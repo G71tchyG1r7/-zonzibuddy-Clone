@@ -1,0 +1,586 @@
+// Make sure to include these at the top if you prefer not to define project-wide:
+// #ifndef UNICODE
+// #define UNICODE
+// #endif
+// #ifndef _UNICODE
+// #define _UNICODE
+// #endif
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+#ifndef GL_BGRA
+#define GL_BGRA 0x80E1
+#endif
+
+#include <windows.h>
+#include <gdiplus.h>
+#include <gl/GL.h>
+#include <gl/GLU.h>
+#include <ole2.h>
+#include <cstdio>
+#include <string>
+#include <iostream>
+#include <thread>
+#include <shared_mutex>
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "opengl32.lib")
+#pragma comment(lib, "glu32.lib")
+#pragma comment(lib, "ole32.lib") // Required for CreateStreamOnHGlobal()
+#include <mutex>
+#include <GL/gl.h>
+
+#include <vector>
+//#define IDR_GIF1 101
+
+using namespace Gdiplus;
+
+/*HWND hwnd;
+HDC hdc;
+GLuint textureID;
+Image* gifImage;
+int WIDTH = 207, HEIGHT = 243;
+UINT frameCount = 1, currentFrame = 0;
+bool useGDI = false;*/
+bool opts = false;
+int max = 3;
+int cur = 0;
+struct SpriteInstance {
+HINSTANCE hInstance;
+    int id;
+    int imageID; // The image to load
+    HWND hwnd;
+    HDC hdc;
+    GLuint textureID;
+    Image* gifImage;
+    UINT frameCount = 1;
+    UINT currentFrame = 0;
+    int WIDTH, HEIGHT;
+
+    ULONG_PTR gdiplusToken;
+    HDC memDC;
+    HBITMAP hBitmap;
+    bool dragging = false;
+    bool pause=false;
+};
+
+    bool useGDI = false;
+
+//    std::mutex mtx; 
+    std::shared_mutex imageMutex;
+     std::vector<std::thread> threads;
+void ShowGLVersion() {
+    const char* version = (const char*)glGetString(GL_VERSION);
+    if (!version) {
+        MessageBoxW(NULL, L"Failed to get GL version!", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // Convert char* (ASCII) to wchar_t* (Unicode)
+    int len = MultiByteToWideChar(CP_ACP, 0, version, -1, NULL, 0);
+    std::wstring wVersion(len, 0);
+    MultiByteToWideChar(CP_ACP, 0, version, -1, &wVersion[0], len);
+
+    MessageBoxW(NULL, wVersion.c_str(), L"ver", MB_OK);
+}
+POINT lastMousePos;
+
+void opmenu(SpriteInstance* sprite){
+HMENU hMenu = CreatePopupMenu();
+    AppendMenuW(hMenu, MF_STRING, 1, L"Close Sprite");
+    AppendMenuW(hMenu, MF_STRING, 2, L"Pause Animation");
+    AppendMenuW(hMenu, MF_STRING, 3, L"Options...");
+    AppendMenuW(hMenu, MF_STRING, 4, L"GL ver");
+
+    POINT pt;
+    GetCursorPos(&pt);
+    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, sprite->hwnd, NULL);
+    DestroyMenu(hMenu);
+}
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	    SpriteInstance* sprite = reinterpret_cast<SpriteInstance*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+
+    switch (msg) {
+    case WM_LBUTTONDOWN: {
+        SetCapture(hwnd);
+        sprite->dragging = true;
+        GetCursorPos(&lastMousePos); // in screen coords
+        return 0;
+    }
+
+    case WM_MOUSEMOVE: {
+        if (sprite->dragging) {
+            POINT curPos;
+            GetCursorPos(&curPos); // current screen pos
+
+            int dx = curPos.x - lastMousePos.x;
+            int dy = curPos.y - lastMousePos.y;
+
+            RECT rect;
+            GetWindowRect(hwnd, &rect);
+            MoveWindow(hwnd, rect.left + dx, rect.top + dy, sprite->WIDTH, sprite->HEIGHT, TRUE);
+
+            lastMousePos = curPos; // update last position
+        }
+        return 0;
+    }
+
+    case WM_LBUTTONUP:
+        sprite->dragging = false;
+        ReleaseCapture();
+        return 0;
+
+    case WM_RBUTTONUP:
+    opmenu(sprite);  // Pass the sprite instance to the function
+    return 0;
+
+case WM_COMMAND:
+    switch (LOWORD(wParam)) {
+        case 1: // Close Sprite
+            PostMessage(sprite->hwnd, WM_CLOSE, 0, 0);  // Close the sprite window
+            break;
+        case 2: // Pause Animation
+            sprite->pause=!sprite->pause;
+            break;
+        case 3: // opts 
+            opts=true;
+            break;
+            case 4: // GLver 
+            ShowGLVersion();
+            break;
+    }
+    return 0;
+
+
+
+    case WM_LBUTTONDBLCLK:
+    opmenu(sprite);
+        return 0;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+INT_PTR CALLBACK OptionsDialogProc(HWND hwndDlg, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_INITDIALOG:
+        // Initialize the options dialog here (e.g., load settings)
+        return TRUE;
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case 106:
+            // Handle saving the options if necessary
+            EndDialog(hwndDlg, 106);
+            return TRUE;
+
+        case 105:
+            // Handle canceling the options without saving
+            EndDialog(hwndDlg, 105);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+void LoadGIFFromResource(SpriteInstance* sprite) {
+    HRSRC hResource = FindResourceW(NULL, MAKEINTRESOURCEW(sprite->imageID), L"GIF");
+    if (!hResource) return;
+
+    DWORD imageSize = SizeofResource(NULL, hResource);
+    HGLOBAL hGlobal = LoadResource(NULL, hResource);
+    if (!hGlobal) return;
+
+    LPVOID pData = LockResource(hGlobal);
+    if (!pData) return;
+
+    IStream* pStream = NULL;
+    CreateStreamOnHGlobal(NULL, TRUE, &pStream);
+
+    ULONG written;
+    pStream->Write(pData, imageSize, &written);
+    LARGE_INTEGER liZero = {};
+    pStream->Seek(liZero, STREAM_SEEK_SET, NULL);
+
+    sprite->gifImage = Image::FromStream(pStream);
+    pStream->Release();
+}
+/*
+void LoadGIFFromResource(int imgid) {
+    // Use wide-character version of FindResource and MAKEINTRESOURCEW.
+        //hInstance = GetModuleHandleW(NULL);
+    HRSRC hRes = FindResourceW(hInstance, MAKEINTRESOURCEW(imgid), L"GIF");
+    //HRSRC hRes = FindResource(hInstance, "mymy.gif", "GIF"); // If using a string ID
+
+    if (!hRes) {
+        MessageBoxW(NULL, L"Resource not found!", L"Error", MB_OK);
+		wchar_t buf[256];
+    	swprintf(buf, 256, L"FindResourceW failed! Error code: %d", GetLastError());
+    	MessageBoxW(NULL, buf, L"Error", MB_OK);
+        return;
+    }
+
+    DWORD dwSize = SizeofResource(hInstance, hRes);
+    HGLOBAL hGlob = LoadResource(hInstance, hRes);
+    LPVOID pData = LockResource(hGlob);
+
+    IStream* pStream = nullptr;
+    if (CreateStreamOnHGlobal(NULL, TRUE, &pStream) == S_OK) {
+        // Write the resource data to the stream.
+        pStream->Write(pData, dwSize, NULL);
+        LARGE_INTEGER li = { 0 };
+        pStream->Seek(li, STREAM_SEEK_SET, NULL);
+        gifImage = new Image(pStream);
+        pStream->Release();
+    }
+}*/
+
+void InitOpenGL(SpriteInstance* sprite, int ofs) {
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = WndProc; // Handles mouse & other events
+    wc.style = CS_DBLCLKS;
+    wc.hInstance = sprite->hInstance;
+    wc.lpszClassName = L"TransparentOverlayClass";
+    RegisterClassW(&wc);
+
+    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    int xPos = screenWidth - sprite->WIDTH - ofs;
+    int yPos = screenHeight - sprite->HEIGHT - 32;
+
+    sprite->hwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        wc.lpszClassName,
+        L"Transparent Overlay",
+        WS_POPUP,
+        xPos, yPos, sprite->WIDTH, sprite->HEIGHT,
+        NULL, NULL, sprite->hInstance, NULL
+    );
+	SetWindowLongPtr(sprite->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(sprite));
+    SetLayeredWindowAttributes(sprite->hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+
+    sprite->hdc = GetDC(sprite->hwnd);
+    PIXELFORMATDESCRIPTOR pfd = {};
+    pfd.nSize = sizeof(PIXELFORMATDESCRIPTOR);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_SUPPORT_OPENGL | PFD_DRAW_TO_WINDOW | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+
+    int pixelFormat = ChoosePixelFormat(sprite->hdc, &pfd);
+    SetPixelFormat(sprite->hdc, pixelFormat, &pfd);
+
+    HGLRC hglrc = wglCreateContext(sprite->hdc);
+    wglMakeCurrent(sprite->hdc, hglrc);
+if(useGDI){return;}
+
+    const char* version = (const char*)glGetString(GL_VERSION);
+    if (!version || version[0] == '\0') {
+        MessageBoxW(NULL, L"OpenGL failed! Falling back to GDI rendering.", L"Warning", MB_OK);
+        useGDI = true;
+        return;
+    } else if (atof(version) < 1.2) {
+        MessageBoxW(NULL, L"OpenGL is too old! Using GDI+ instead.", L"Warning", MB_OK);
+        useGDI = true;
+        return;
+    }
+	
+
+    glEnable(GL_TEXTURE_2D);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glGenTextures(1, &sprite->textureID);
+}
+
+
+/*void InitOpenGL(int ofs) {
+    WNDCLASSW wc = {};
+    //wc.lpfnWndProc = DefWindowProcW;
+    wc.lpfnWndProc = WndProc; // instead of DefWindowProcW
+wc.style = CS_DBLCLKS;
+
+    wc.hInstance = hInstance;
+    wc.lpszClassName = L"TransparentOverlayClass";
+    RegisterClassW(&wc);
+int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+int xPos = screenWidth - WIDTH-ofs;                          // Keep it at the r edge
+int yPos = screenHeight - HEIGHT-32;      // Move it to the bottom
+
+    hwnd = CreateWindowExW(
+    WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, 
+    wc.lpszClassName, 
+    L"Transparent Overlay", 
+    WS_POPUP, 
+    xPos, yPos, WIDTH, HEIGHT, 
+    NULL, NULL, hInstance, NULL);
+
+
+    SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+
+    hdc = GetDC(hwnd);
+    PIXELFORMATDESCRIPTOR pfd = {};
+    pfd.nSize = sizeof(PIXELFORMATDESCRIPTOR);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_SUPPORT_OPENGL | PFD_DRAW_TO_WINDOW | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+
+    int pixelFormat = ChoosePixelFormat(hdc, &pfd);
+    SetPixelFormat(hdc, pixelFormat, &pfd);
+
+    HGLRC hglrc = wglCreateContext(hdc);
+    wglMakeCurrent(hdc, hglrc);
+
+// Check if OpenGL is actually working
+    const char* version = (const char*)glGetString(GL_VERSION);
+    //ShowGLVersion();
+    if (!version || version[0] == '\0') {
+        MessageBoxW(NULL, L"OpenGL failed! Falling back to GDI rendering.", L"Warning", MB_OK);
+        useGDI = true; // Set flag to use GDI instead
+        return;
+    }else if (version && atof(version) < 1.2) {  // If OpenGL is too old, fallback
+        useGDI = true;
+        MessageBoxW(NULL, L"OpenGL is too old! Using GDI+ instead.", L"Warning", MB_OK);
+        return;
+    }
+
+    glEnable(GL_TEXTURE_2D);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    
+    glGenTextures(1, &textureID);
+}*/
+
+void LoadFrameToTexture(SpriteInstance* sprite) {
+    GUID dimension = FrameDimensionTime;
+    sprite->gifImage->SelectActiveFrame(&dimension, sprite->currentFrame);
+
+    // Clone the current frame from the GIF
+    Bitmap* frame = static_cast<Bitmap*>(sprite->gifImage->Clone());
+
+    // Create HBITMAP
+    frame->GetHBITMAP(Color(0, 0, 0), &sprite->hBitmap);
+    sprite->memDC = CreateCompatibleDC(sprite->hdc);
+    SelectObject(sprite->memDC, sprite->hBitmap);
+
+    // Set up OpenGL texture
+    glBindTexture(GL_TEXTURE_2D, sprite->textureID);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    BitmapData bmpData;
+    Rect rect(0, 0, sprite->WIDTH, sprite->HEIGHT);
+
+    // Lock the frame to access pixel data
+    frame->LockBits(
+        &rect,
+        ImageLockModeRead,
+        PixelFormat32bppARGB,
+        &bmpData // store here!
+    );
+
+    BYTE* pixels = new BYTE[sprite->WIDTH * sprite->HEIGHT * 4];
+    UINT* src = (UINT*)bmpData.Scan0;
+
+    // Copy and flip pixels vertically
+    for (int y = 0; y < sprite->HEIGHT; y++) {
+        int srcIndex = y * sprite->WIDTH;
+        int destIndex = (sprite->HEIGHT - 1 - y) * sprite->WIDTH;
+        
+        // Copy one row at a time, flipping vertically
+        for (int x = 0; x < sprite->WIDTH; x++) {
+            // Extract ARGB components
+            BYTE r = (src[srcIndex + x] >> 16) & 0xFF;
+            BYTE g = (src[srcIndex + x] >> 8)  & 0xFF;
+            BYTE b = (src[srcIndex + x] >> 0)  & 0xFF;
+            BYTE a = (src[srcIndex + x] >> 24) & 0xFF;
+
+            // Set the flipped pixel
+            pixels[(destIndex + x) * 4 + 0] = r;
+            pixels[(destIndex + x) * 4 + 1] = g;
+            pixels[(destIndex + x) * 4 + 2] = b;
+            pixels[(destIndex + x) * 4 + 3] = a;
+        }
+    }
+
+    // Now upload the flipped pixel data to OpenGL
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA,
+        sprite->WIDTH,
+        sprite->HEIGHT,
+        0,
+        GL_RGBA, // Use BGRA format for OpenGL
+        GL_UNSIGNED_BYTE,
+        pixels
+    );
+
+    // Clean up
+    delete[] pixels;
+    frame->UnlockBits(&bmpData); // Unlock bitmap data
+    delete frame; // Clean up bitmap
+}
+
+
+/*void LoadFrameToTexture() {
+    if (!gifImage) return;
+
+    gifImage->SelectActiveFrame(&FrameDimensionTime, currentFrame);  // Ensure correct frame
+
+    Bitmap* frame = static_cast<Bitmap*>(gifImage);
+    BitmapData bmpData;
+    Rect rect(0, 0, WIDTH, HEIGHT);
+    frame->LockBits(&rect, ImageLockModeRead, PixelFormat32bppARGB, &bmpData);
+
+    
+
+glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, WIDTH, HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, flippedPixels);
+
+
+
+    frame->UnlockBits(&bmpData);
+
+int centerIdx = (WIDTH * (HEIGHT / 2) + (WIDTH / 2)) * 4;
+wchar_t buf[256];
+swprintf(buf, 256, L"Center pixel: R=%d, G=%d, B=%d, A=%d", 
+         pixels[centerIdx], pixels[centerIdx+1], pixels[centerIdx+2], pixels[centerIdx+3]);
+MessageBoxW(NULL, buf, L"Pixel Info", MB_OK);
+
+
+glBindTexture(GL_TEXTURE_2D, textureID);
+//glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, WIDTH, HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+
+    delete[] pixels;
+}*/
+
+
+void RenderGifOverlay(SpriteInstance* sprite) {
+	if (useGDI) {
+        HDC hdc = GetDC(sprite->hwnd);
+
+        // Create a compatible DC and bitmap
+        HDC hdcMem = CreateCompatibleDC(hdc);
+        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, sprite->WIDTH, sprite->HEIGHT);
+        SelectObject(hdcMem, hbmMem);
+
+        // Fill with full transparency (black with 0 alpha)
+        Gdiplus::Graphics graphics(hdcMem);
+        graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
+
+        // Draw the GIF onto the memory DC
+        graphics.DrawImage(sprite->gifImage, 0, 0, sprite->WIDTH, sprite->HEIGHT);
+
+        // Copy the transparent buffer to the window
+        BitBlt(hdc, 0, 0, sprite->WIDTH, sprite->HEIGHT, hdcMem, 0, 0, SRCCOPY);
+
+        // Cleanup
+        DeleteObject(hbmMem);
+        DeleteDC(hdcMem);
+        ReleaseDC(sprite->hwnd, hdc);
+
+        return;
+    }
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glBindTexture(GL_TEXTURE_2D, sprite->textureID);
+
+    glBegin(GL_QUADS);
+        glTexCoord2f(0.0f, 0.0f); glVertex2f(-1.0f, -1.0f);
+        glTexCoord2f(1.0f, 0.0f); glVertex2f( 1.0f, -1.0f);
+        glTexCoord2f(1.0f, 1.0f); glVertex2f( 1.0f,  1.0f);
+        glTexCoord2f(0.0f, 1.0f); glVertex2f(-1.0f,  1.0f);
+    glEnd();
+
+    SwapBuffers(sprite->hdc);
+}
+
+
+DWORD WINAPI winth(int imgid,int id) {
+    
+	SpriteInstance* sprite=new SpriteInstance;// = (SpriteInstance*)lpParam;LPVOID lpParam
+    sprite->id=id;
+    sprite->imageID=imgid;
+    cur++;
+    sprite->hInstance = GetModuleHandleW(NULL);
+
+    GdiplusStartupInput gdiplusStartupInput;
+    GdiplusStartup(&sprite->gdiplusToken, &gdiplusStartupInput, NULL);
+
+    LoadGIFFromResource(sprite);
+    sprite->WIDTH = sprite->gifImage->GetWidth();
+    sprite->HEIGHT = sprite->gifImage->GetHeight();
+    sprite->frameCount = sprite->gifImage->GetFrameCount(&FrameDimensionTime);
+
+    InitOpenGL(sprite, sprite->id * sprite->WIDTH);
+
+    ShowWindow(sprite->hwnd, SW_SHOW);
+    UpdateWindow(sprite->hwnd);
+
+    MSG msg;
+    while (true) {
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT)
+                return 0;
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+if(!sprite->pause){
+
+        sprite->currentFrame = (sprite->currentFrame + 1) % sprite->frameCount;
+
+        LoadFrameToTexture(sprite);
+        RenderGifOverlay(sprite);
+
+        Sleep(100);}
+
+        if (sprite->id > max) {
+            delete sprite;
+            ExitThread(0);
+        }
+    }
+}
+void maxch(int numThreads,int cur,int imgid = 1){
+	//for (int i = cur; i < numThreads; ++i) {
+        //threads.push_back(std::thread(winth, imgid + 100, i));  // Pass arguments to the function
+    //}
+}
+int main() {
+    std::thread tmy(winth,101,1);
+	tmy.detach();
+	sleep(1);
+    std::thread tma(winth,102,2);
+	tma.detach();
+    std::thread tco(winth,103,3);
+	tco.detach();
+
+while(true){
+	if (opts) {
+        // Create and show the Options dialog window when opts is true
+        DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(104), NULL, OptionsDialogProc);
+        opts = false; // Reset opts to false after the window is opened
+    }
+	//if(max>cur){
+	//maxch(max,cur);
+	//}
+	/*MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }*/
+	sleep(1);
+}
+
+    return 0;
+}
