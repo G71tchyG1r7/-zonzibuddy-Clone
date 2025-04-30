@@ -1,0 +1,29 @@
+
+101 GIF "molly.gif"
+
+#include <windows.h>
+
+104 DIALOGEX 0, 0, 300, 160  // Increased height to fit both the checkbox and speed bar
+STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "Sprite Options"
+FONT 8, "MS Sans Serif"
+BEGIN
+    // Labels and ComboBox for GIF Selection
+    //LTEXT "Select GIF:", -1, 10, 10, 50, 10
+    //COMBOBOX 202, 70, 10, 220, 60, CBS_DROPDOWNLIST | WS_VSCROLL
+
+    // Max Sprites Field
+    LTEXT "Max Sprites:", -1, 10, 40, 50, 10
+    EDITTEXT 203, 70, 40, 50, 20, ES_AUTOHSCROLL | ES_NUMBER
+
+    // Forkie Mode Checkbox
+    CONTROL "Enable Forkie Mode", 204, "BUTTON", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 70, 80, 10
+
+    // Forkie Mode Speed Slider
+    LTEXT "Forkie Mode Speed:", -1, 10, 90, 80, 10
+    CONTROL "", 205, "msctls_trackbar32", WS_TABSTOP, 90, 90, 200, 20
+
+    // OK and Cancel Buttons
+    PUSHBUTTON "OK", 106, 140, 130, 50, 20, WS_TABSTOP
+    PUSHBUTTON "Cancel", 105, 210, 130, 50, 20, WS_TABSTOP
+END
